@@ -1,44 +1,88 @@
 #include <Wire.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
-
-Adafruit_MPU6050 mpu;
-
-void setup() {
-  Serial.begin(115200);
-  while (!Serial) {}
-
-  Wire.begin(); // MKR1010 SDA/SCL pins
-  // If you set AD0 HIGH (address 0x69), pass it here:
-  // if (!mpu.begin(0x69)) { ... }
-  if (!mpu.begin(8192)) {
-    Serial.println("MPU6050 not found at 8192.");
-    while (1) delay(10);
-  }
-  Serial.println("MPU6050 ready.");
-
-  // Optional: configure ranges & filter
-  mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-}
-
-void loop() {
-  sensors_event_t a, g, t;
-  mpu.getEvent(&a, &g, &t);
-
-  Serial.print("Accel (m/s^2): ");
-  Serial.print(a.acceleration.x); Serial.print(", ");
-  Serial.print(a.acceleration.y); Serial.print(", ");
-  Serial.print(a.acceleration.z);
-
-  Serial.print(" | Gyro (rad/s): ");
-  Serial.print(g.gyro.x); Serial.print(", ");
-  Serial.print(g.gyro.y); Serial.print(", ");
-  Serial.print(g.gyro.z);
-
-  Serial.print(" | Temp (°C): ");
-  Serial.println(t.temperature);
-
-  delay(200);
-}
+ #include "MPU6050_6Axis_MotionApps20.h" // Rowberg DMP header
+ 
+ MPU6050 mpu;
+ bool dmpReady = false;
+ uint16_t packetSize; // expected DMP packet size (usually 42)
+ uint16_t fifoCount;
+ uint8_t fifoBuffer[64];
+ 
+ Quaternion q;
+ VectorFloat gravity;
+ float ypr[3];
+ 
+ void setup() {
+ Serial.begin(115200); while(!Serial){}
+ Wire.begin();
+ Wire.setClock(400000);
+ 
+ mpu.initialize();
+ if (!mpu.testConnection()) { Serial.println("MPU connect FAIL"); while(1){} }
+ 
+ // DMP init
+ int status = mpu.dmpInitialize();
+ if (status != 0) {
+ Serial.print("DMP init fail: "); Serial.println(status);
+ while(1){}
+ }
+ 
+ // (Optional but helps) lower DMP FIFO rate to reduce overflow if available
+ // mpu.dmpSetFIFORate(50); // 50 Hz; comment out if your header lacks this
+ 
+ mpu.setDMPEnabled(true);
+ 
+ // Configure INT pin behavior (not strictly needed in polling mode)
+ mpu.setInterruptMode(false); // active HIGH
+ mpu.setInterruptDrive(false); // push-pull
+ mpu.setInterruptLatch(true); // latch until cleared
+ mpu.setInterruptLatchClear(true); // clear on read of INT_STATUS
+ 
+ // Enable only DMP interrupt bit in case you later use ISR
+ mpu.setIntEnabled(0x02);
+ 
+ packetSize = mpu.dmpGetFIFOPacketSize();
+ dmpReady = true;
+ 
+ Serial.print("DMP ready. packetSize="); Serial.println(packetSize);
+ }
+ 
+ void loop() {
+ if (!dmpReady) return;
+ 
+ fifoCount = mpu.getFIFOCount();
+ 
+ // Handle overflow immediately
+ if (fifoCount == 1024) {
+ mpu.resetFIFO();
+ Serial.println("FIFO overflow -> reset");
+ return;
+ }
+ 
+ if (fifoCount < packetSize) {
+ // not enough data yet
+ delay(2);
+ return;
+ }
+ 
+ // Drain all complete packets
+ while (fifoCount >= packetSize) {
+ mpu.getFIFOBytes(fifoBuffer, packetSize);
+ fifoCount -= packetSize;
+ 
+ // Parse one packet
+ mpu.dmpGetQuaternion(&q, fifoBuffer);
+ mpu.dmpGetGravity(&gravity, &q);
+ mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+ 
+ // Print at a modest rate so Serial doesn’t bottleneck
+ static uint32_t last = 0;
+ uint32_t now = millis();
+ if (now - last >= 50) { // ~20 Hz print
+ Serial.print("ypr\t");
+ Serial.print(ypr[0] * 180.0/M_PI); Serial.print('\t');
+ Serial.print(ypr[1] * 180.0/M_PI); Serial.print('\t');
+ Serial.println(ypr[2] * 180.0/M_PI);
+ last = now;
+ }
+ }
+ }
