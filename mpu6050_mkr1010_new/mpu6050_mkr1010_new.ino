@@ -27,7 +27,7 @@
  }
  
  // (Optional but helps) lower DMP FIFO rate to reduce overflow if available
- // mpu.dmpSetFIFORate(50); // 50 Hz; comment out if your header lacks this
+mpu.dmpSetFIFORate(50); 
  
  mpu.setDMPEnabled(true);
  
