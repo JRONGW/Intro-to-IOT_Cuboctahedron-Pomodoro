@@ -30,6 +30,8 @@ const char* mqtt_base_topic = "student/CASA0014/luminaire";
 // Assuming user IDs are up to 4 digits, a length of 64 is safe.
 char mqtt_data_topic[64];
 
+
+
 // Fixed control topics
 const char* user_update_topic = "student/CASA0014/luminaire/user";
 const char* brightness_update_topic = "student/CASA0014/luminaire/brightness";
@@ -37,7 +39,7 @@ const char* brightness_update_topic = "student/CASA0014/luminaire/brightness";
 
 // --- Use this variable to see if we should change lights or not
 // --- Defaults to 0 - staff user - on start up
-int LUMINAIRE_USER = 0;
+int LUMINAIRE_USER = 25;
 int LUMINAIRE_BRIGHTNESS = 150;
 
 
@@ -383,6 +385,8 @@ void runProgramPreview(){
 void setup(){
   // Initialize serial communication for debugging
   Serial.begin(115200);
+
+
   while(!Serial);// Wait for serial port to connect (useful for debugging)
 
   // RGB LED's
