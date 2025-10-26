@@ -1,6 +1,26 @@
-/********* INCLUDES *********/
+/***************************************************************
+ * MKR WiFi 1010 + MPU-6050 (GY-521) — Cuboctahedron Face Detection
+ * + WiFiNINA + MQTT (tcp 1884) + 72-pixel Website Effects
+ *
+ * Detection (accelerometer-only):
+ *  - Hold a face steady for 10 s (DWELL_MS) to confirm.
+ *  - Re-arms immediately after confirmation.
+ *  - Suppresses re-trigger on the SAME face; requires a DIFFERENT face next.
+ *
+ * Effects on website grid (72 pixels, publishes 216-byte RGB frames):
+ *  - Square DOWN   → PINK↔WHITE ROW scan for 20 s → YELLOW chaser (0→71 loop)
+ *  - Triangle DOWN → BLUE↔WHITE COLUMN scan for 10 s → YELLOW chaser
+ *
+ * MQTT:
+ *   host: mqtt.cetools.org
+ *   port: 1884 (TCP)
+ *   publish topic: student/CASA0014/luminaire/<USER>
+ *   listens for: student/CASA0014/luminaire/user, .../brightness
+ ***************************************************************/
 #include <Wire.h>
-#include "MPU6050_6Axis_MotionApps20.h"   // Rowberg DMP header
+#include <math.h>
+#include "I2Cdev.h"
+#include "MPU6050.h"
 
 #include <SPI.h>
 #include <WiFiNINA.h>
@@ -8,470 +28,468 @@
 #include <Adafruit_NeoPixel.h>
 #include <utility/wifi_drv.h>
 
-#include "arduino_secrets.h" // defines SECRET_SSID / SECRET_PASS
+#include "arduino_secrets.h"  // SECRET_SSID / SECRET_PASS (+ optional MQTT_USERNAME / MQTT_PASSWORD)
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-/********* WIFI / MQTT *********/
+/********* WIFI *********/
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
 
-// MQTT broker + topics
-const char* mqtt_server     = "mqtt.cetools.org";
-const int   mqtt_port       = 1883;
-const char* mqtt_client_id  = "MKR1010_NeoPixel_Luminaire_Vespera";
-const char* mqtt_cmd_topic  = "student/CASA0014/luminaire/cmd";   // we PUBLISH timer + state here
+/********* MQTT *********/
+static const char* MQTT_HOST     = "mqtt.cetools.org";
+static const int   MQTT_PORT     = 1884;  // use 1884
+static const char* MQTT_CLIENTID = "MKR1010_Cubo_FaceEffects";
 
-const char* mqtt_base_topic = "student/CASA0014/luminaire";       // for per-user frame payloads
-char        mqtt_data_topic[64];                                   // will be "<base>/<LUMINAIRE_USER>"
+// Optional auth via arduino_secrets.h:
+//   #define MQTT_USERNAME "user"
+//   #define MQTT_PASSWORD "pass"
+#ifdef MQTT_USERNAME
+  #define HAS_MQTT_AUTH 1
+#else
+  #define HAS_MQTT_AUTH 0
+#endif
 
-const char* user_update_topic      = "student/CASA0014/luminaire/user";
-const char* brightness_update_topic= "student/CASA0014/luminaire/brightness";
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
 
-// App state that can be updated via MQTT
-int LUMINAIRE_USER       = 25;   // <— set your default user id here
-int LUMINAIRE_BRIGHTNESS = 150;
+/********* Topics *********/
+const char* mqtt_cmd_topic          = "student/CASA0014/luminaire/cmd";
+const char* mqtt_base_topic         = "student/CASA0014/luminaire";
+const char* user_update_topic       = "student/CASA0014/luminaire/user";
+const char* brightness_update_topic = "student/CASA0014/luminaire/brightness";
 
-/********* NEOPIXEL *********/
-#define NEOPIXEL_PIN   6
+int  LUMINAIRE_USER       = 25;   // change if needed
+int  LUMINAIRE_BRIGHTNESS = 150;  // 0..255 (used for local mirror only)
+char mqtt_data_topic[64];         // student/CASA0014/luminaire/<user>
+
+/********* Website “virtual strip” *********/
 #define NEOPIXEL_COUNT 72
 #define NEOPIXEL_DATA_LENGTH (NEOPIXEL_COUNT * 3)
+uint8_t frameBuf[NEOPIXEL_DATA_LENGTH];
 
-WiFiClient       wifiClient;
-PubSubClient     mqttClient(wifiClient);
+/********* Optional local mirror strip *********/
+#define NEOPIXEL_PIN 6
 Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
-// Optional: local preview of the running program on the strip
-const bool LOCAL_PREVIEW_ON_NEOPIXEL = false;
+/********* IMU *********/
+MPU6050 mpu;   // default address 0x68
 
-/********* IMU / DMP *********/
-MPU6050  mpu(0x68);
-bool     dmpReady   = false;
-uint16_t packetSize = 0;
-uint16_t fifoCount  = 0;
-uint8_t  fifoBuffer[64];
-
-Quaternion  q;
-VectorFloat gravity;
-float       ypr[3];
-
-/********* FACE LOGIC *********/
-// Lock after N ms steady
-const unsigned long STABLE_REQUIRED_MS = 10000UL; // 10 s
-
-// Program durations
-const unsigned long DURATION_SQUARE_MS   = 30UL * 1000UL; // 30 s
-const unsigned long DURATION_TRIANGLE_MS = 10UL * 1000UL; // 10 s
-const unsigned long BLINK_PERIOD_MS      = 1500UL;
-
-// Angle thresholds (deg) based on your experiments (with hysteresis)
-const float THR_SQUARE_ENTER_DEG = 25.0f;
-const float THR_SQUARE_EXIT_DEG  = 30.0f;
-
-const float THR_TRI_ENTER_DEG    = 20.0f;
-const float THR_TRI_EXIT_DEG     = 25.0f;
-
-struct Normal { float x,y,z; bool isSquare; const char* name; };
-Normal SQUARES[6] = {
-  {  1,  0,  0, true,  "+X" },
-  { -1,  0,  0, true,  "-X" },
-  {  0,  1,  0, true,  "+Y" },
-  {  0, -1,  0, true,  "-Y" },
-  {  0,  0,  1, true,  "+Z" },
-  {  0,  0, -1, true,  "-Z" }
+/********* FACE NORMALS (like your IMU-only sketch) *********/
+// 6 square-face outward normals
+const float N6[6][3] = {
+  { 1, 0, 0}, {-1, 0, 0},
+  { 0, 1, 0}, { 0,-1, 0},
+  { 0, 0, 1}, { 0, 0,-1}
 };
-const float N = 0.57735027f;
-Normal TRIS[8] = {
-  {  N,  N,  N, false, "+++" },
-  {  N,  N, -N, false, "++-" },
-  {  N, -N,  N, false, "+-+" },
-  {  N, -N, -N, false, "+--" },
-  { -N,  N,  N, false, "-++" },
-  { -N,  N, -N, false, "-+-" },
-  { -N, -N,  N, false, "--+" },
-  { -N, -N, -N, false, "---" }
-};
-Normal ALL[14];
+const char* N6name[6] = {"+X","-X","+Y","-Y","+Z","-Z"};
 
-static inline float dot3(float ax,float ay,float az,float bx,float by,float bz){
-  return ax*bx + ay*by + az*bz;
+// 8 triangle-face outward normals (unit)
+const float sN = 0.57735026919f; // 1/sqrt(3)
+const float N8[8][3] = {
+  { sN, sN, sN}, { sN, sN,-sN}, { sN,-sN, sN}, { sN,-sN,-sN},
+  {-sN, sN, sN}, {-sN, sN,-sN}, {-sN,-sN, sN}, {-sN,-sN,-sN}
+};
+const char* N8name[8] = {
+  "+ + +","+ + -","+ - +","+ - -",
+  "- + +","- + -","- - +","- - -"
+};
+
+/********* Detection thresholds & timing *********/
+const float ENTER_TH     = 0.80f;
+const float EXIT_TH      = 0.72f;        // kept for stability
+const float LPF_ALPHA    = 0.20f;        // accel LPF (0..1)
+const unsigned long DWELL_MS      = 10000UL; // 10 s confirm
+const unsigned long REARM_DROP_MS = 800UL;   // unused for hard re-arm, kept for robustness
+
+struct FaceState { bool isSquare; int idx; float score; };
+
+static inline float invSqrt(float x) { return 1.0f / sqrtf(x); }
+static inline bool sameFace(const FaceState& a, const FaceState& b) {
+  return (a.idx == b.idx) && (a.isSquare == b.isSquare);
 }
 
-// face state
-int currentFace = -1, lastFace = -1;
-int lastReportedFace = -2; // for printing candidate changes
-bool faceLocked = false;
-unsigned long faceChangeTime = 0;
+/*** Detection state ***/
+FaceState currentFace      = { true, -1, -1.0f };
+bool      haveLPF          = false;
+float     gx_f=0, gy_f=0, gz_f=0;
 
-// program state
-bool programRunning   = false;
-bool programIsSquare  = false;
-unsigned long programStart = 0;
+FaceState dwellCandidate   = { true, -1, -1.0f };
+unsigned long dwellStartMs = 0;
 
-/********* RECONNECT CONTROL *********/
-unsigned long lastConnectionAttempt = 0;
-const unsigned long RECONNECT_INTERVAL_MS = 5000;
+// last confirmed (used to suppress same-face retrigger)
+FaceState lastConfirmed    = { true, -1, -1.0f };
 
-/********* HELPERS *********/
-void buildNormals(){
-  for (int i=0;i<6;i++)   ALL[i]   = SQUARES[i];
-  for (int i=0;i<8;i++)   ALL[6+i] = TRIS[i];
+// optional re-arm on dips (robustness)
+unsigned long belowStartMs = 0;
+bool belowActive           = false;
+
+/********* Effect program *********/
+const unsigned long DURATION_SQUARE_MS   = 20000UL;
+const unsigned long DURATION_TRIANGLE_MS = 10000UL;
+
+const unsigned long SCAN_PERIOD_MS  = 150UL;  // step rate for scans
+const unsigned long CHASE_PERIOD_MS = 80UL;   // yellow chaser step rate
+
+bool programRunning=false, programIsSquare=false;
+unsigned long programStart=0, effectStartMs=0;
+
+enum EffectMode { EFFECT_IDLE, EFFECT_SQUARE, EFFECT_TRIANGLE, EFFECT_YELLOW };
+EffectMode effect = EFFECT_IDLE;
+
+// Scan & chaser indices
+int scanRow = 0;          // 0..5 (top→bottom) for square
+int scanCol = 0;          // 0..11 (left→right) for triangle  <<< NEW
+int chaseIdx = 0;         // 0..71
+unsigned long lastStepMs = 0;
+
+/********* Onboard RGB helpers (via NINA) — 25=R, 26=G, 27=B *********/
+static inline void setRGB(uint8_t r,uint8_t g,uint8_t b){
+  WiFiDrv::pinMode(25, OUTPUT);
+  WiFiDrv::pinMode(26, OUTPUT);
+  WiFiDrv::pinMode(27, OUTPUT);
+  WiFiDrv::analogWrite(25, r);
+  WiFiDrv::analogWrite(26, g);
+  WiFiDrv::analogWrite(27, b);
+}
+static inline void LedRed()    { setRGB(155,0,0); }
+static inline void LedGreen()  { setRGB(0,155,0); }
+static inline void LedBlue()   { setRGB(0,0,155); }
+static inline void LedYellow() { setRGB(255,255,0); }
+static inline void LedWhite()  { setRGB(255,255,255); }
+static inline void LedPink()   { setRGB(255,64,128); }
+
+/********* Website frame helpers *********/
+void fillSolidFrame(uint8_t r, uint8_t g, uint8_t b){
+  for (int i=0;i<NEOPIXEL_COUNT;i++){ frameBuf[i*3+0]=r; frameBuf[i*3+1]=g; frameBuf[i*3+2]=b; }
+}
+static inline int idxFromRowCol(int r, int c){ return c*6 + r; } // 6 rows × 12 cols
+
+void renderRowScanFrame(int r, uint8_t rr,uint8_t rg,uint8_t rb, uint8_t br,uint8_t bg,uint8_t bb){
+  fillSolidFrame(br,bg,bb);
+  for (int c=0;c<12;c++){
+    int i = idxFromRowCol(r,c);
+    frameBuf[i*3+0]=rr; frameBuf[i*3+1]=rg; frameBuf[i*3+2]=rb;
+  }
 }
 
-void LedRed(){   WiFiDrv::digitalWrite(25, LOW); WiFiDrv::digitalWrite(26, HIGH); WiFiDrv::digitalWrite(27, LOW); }
-void LedGreen(){ WiFiDrv::digitalWrite(25, HIGH);WiFiDrv::digitalWrite(26, LOW);  WiFiDrv::digitalWrite(27, LOW); }
-void LedBlue(){  WiFiDrv::digitalWrite(25, LOW); WiFiDrv::digitalWrite(26, LOW);  WiFiDrv::digitalWrite(27, HIGH); }
+// NEW: column scan helper
+void renderColScanFrame(int c, uint8_t cr,uint8_t cg,uint8_t cb, uint8_t br,uint8_t bg,uint8_t bb){
+  fillSolidFrame(br,bg,bb);
+  if (c<0) c=0; if (c>11) c=11;
+  for (int r=0;r<6;r++){
+    int i = idxFromRowCol(r,c);
+    frameBuf[i*3+0]=cr; frameBuf[i*3+1]=cg; frameBuf[i*3+2]=cb;
+  }
+}
 
-void showAll(uint8_t r,uint8_t g,uint8_t b){
-  for (int i=0;i<NEOPIXEL_COUNT;i++) pixels.setPixelColor(i, r,g,b);
+void renderChaserFrame(int i, uint8_t r,uint8_t g,uint8_t b){
+  fillSolidFrame(0,0,0);
+  if (i<0) i=0; if (i>=NEOPIXEL_COUNT) i=NEOPIXEL_COUNT-1;
+  frameBuf[i*3+0]=r; frameBuf[i*3+1]=g; frameBuf[i*3+2]=b;
+}
+
+bool publishFrame(){
+  if (!mqttClient.connected()){
+    Serial.println("[MQTT] Not connected; frame NOT published.");
+    return false;
+  }
+  bool ok = mqttClient.publish(mqtt_data_topic, frameBuf, NEOPIXEL_DATA_LENGTH);
+  Serial.print("[PUB] "); Serial.print(NEOPIXEL_DATA_LENGTH); Serial.print("B -> "); Serial.println(mqtt_data_topic);
+  if (!ok){ Serial.print("  state="); Serial.println(mqttClient.state()); }
+  return ok;
+}
+void showLocalMirror(){
+  pixels.setBrightness(LUMINAIRE_BRIGHTNESS);
+  for (int i=0;i<NEOPIXEL_COUNT;i++){ pixels.setPixelColor(i, frameBuf[i*3+0], frameBuf[i*3+1], frameBuf[i*3+2]); }
   pixels.show();
 }
+void publishSolidAndShow(uint8_t r,uint8_t g,uint8_t b){
+  fillSolidFrame(r,g,b); publishFrame(); setRGB(r,g,b); showLocalMirror();
+}
 
-/********* MQTT STATE PUBLISH *********/
+/********* MQTT status JSON (optional telemetry) *********/
 void publishCmdJSON(const char* palette, uint16_t seconds, const char* faceName){
   char buf[200];
   snprintf(buf, sizeof(buf),
     "{\"device\":\"%s\",\"cmd\":\"timer\",\"palette\":\"%s\",\"seconds\":%u,\"face\":\"%s\"}",
-    mqtt_client_id, palette, seconds, faceName ? faceName : "");
+    MQTT_CLIENTID, palette, seconds, faceName ? faceName : "");
   mqttClient.publish(mqtt_cmd_topic, buf);
 }
-
-void publishState(const char* faceName, const char* faceType, float angleDeg, float dot, bool valid, bool locked){
-  // minimal JSON to the same cmd topic with cmd:"state"
-  char buf[240];
+void publishState(const char* faceName, const char* faceType, float score, bool valid, bool locked){
+  char buf[220];
   snprintf(buf, sizeof(buf),
-    "{\"device\":\"%s\",\"cmd\":\"state\",\"face\":\"%s\",\"type\":\"%s\",\"angle\":%.1f,\"dot\":%.3f,\"valid\":%s,\"locked\":%s}",
-    mqtt_client_id,
-    faceName ? faceName : "none",
-    faceType ? faceType : "none",
-    angleDeg, dot,
-    valid ? "true" : "false",
-    locked ? "true" : "false"
-  );
+    "{\"device\":\"%s\",\"cmd\":\"state\",\"face\":\"%s\",\"type\":\"%s\",\"score\":%.3f,\"valid\":%s,\"locked\":%s}",
+    MQTT_CLIENTID, faceName ? faceName : "none", faceType ? faceType : "none",
+    score, valid ? "true":"false", locked ? "true":"false");
   mqttClient.publish(mqtt_cmd_topic, buf);
 }
 
-/********* WIFI / MQTT *********/
+/********* Wi-Fi *********/
 void ensureWiFi(){
   if (WiFi.status() == WL_CONNECTED) return;
-
-  if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("WiFi module not present!");
-    while (true) delay(1000);
-  }
-
+  if (WiFi.status() == WL_NO_MODULE) { Serial.println("WiFi module not present!"); return; }
   LedBlue();
-  Serial.print("Connecting to WiFi: "); Serial.println(ssid);
-
+  Serial.print("Connecting WiFi: "); Serial.println(ssid);
   int st = WL_IDLE_STATUS;
-  while (st != WL_CONNECTED){
-    st = WiFi.begin(ssid, pass);
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP: "); Serial.println(WiFi.localIP());
+  while (st != WL_CONNECTED){ st = WiFi.begin(ssid, pass); delay(500); Serial.print("."); }
+  Serial.println(); Serial.print("WiFi OK, IP: "); Serial.println(WiFi.localIP());
   LedGreen();
 }
 
-void mqtt_callback(char* topic, byte* payload, unsigned int length){
-  // Copy payload into a null-terminated string
-  char payload_str[length+1];
-  memcpy(payload_str, payload, length);
-  payload_str[length] = '\0';
-
+/********* MQTT *********/
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, user_update_topic) == 0){
-    int new_user = atoi(payload_str);
+    char s[16]; unsigned n = min(length, (unsigned)(sizeof(s)-1)); memcpy(s,payload,n); s[n]='\0';
+    int new_user = atoi(s);
     if (new_user != LUMINAIRE_USER){
-      // Unsub old topic
       mqttClient.unsubscribe(mqtt_data_topic);
       LUMINAIRE_USER = new_user;
       snprintf(mqtt_data_topic, sizeof(mqtt_data_topic), "%s/%d", mqtt_base_topic, LUMINAIRE_USER);
       mqttClient.subscribe(mqtt_data_topic);
-      Serial.print("LUMINAIRE_USER -> "); Serial.println(LUMINAIRE_USER);
-
-      pixels.clear(); pixels.show();
+      Serial.print("[TOPIC] -> "); Serial.println(mqtt_data_topic);
+      publishSolidAndShow(0,0,0); // clear on change
     }
-  } else if (strcmp(topic, brightness_update_topic) == 0){
-    int b = atoi(payload_str);
-    LUMINAIRE_BRIGHTNESS = b;
-    pixels.setBrightness(LUMINAIRE_BRIGHTNESS);
-    Serial.print("LUMINAIRE_BRIGHTNESS -> "); Serial.println(LUMINAIRE_BRIGHTNESS);
-  } else {
-    // Per-user frame topic: update NeoPixels from binary RGB payload
-    // (length must equal NEOPIXEL_DATA_LENGTH)
-    if (length == NEOPIXEL_DATA_LENGTH){
-      for (int i=0;i<NEOPIXEL_COUNT;i++){
-        byte r = payload[i*3 + 0];
-        byte g = payload[i*3 + 1];
-        byte b = payload[i*3 + 2];
-        pixels.setPixelColor(i, r,g,b);
-      }
-      pixels.show();
-    }
+    return;
+  }
+  if (strcmp(topic, brightness_update_topic) == 0){
+    char s[16]; unsigned n = min(length, (unsigned)(sizeof(s)-1)); memcpy(s,payload,n); s[n]='\0';
+    int nb = atoi(s); if (nb<0) nb=0; if (nb>255) nb=255;
+    LUMINAIRE_BRIGHTNESS = nb; showLocalMirror();
+    Serial.print("BRIGHTNESS -> "); Serial.println(LUMINAIRE_BRIGHTNESS);
+    return;
   }
 }
-
+unsigned long lastConnectionAttempt=0;
+const unsigned long RECONNECT_INTERVAL_MS=5000;
 void ensureMQTT(){
   if (mqttClient.connected()) return;
   if (millis() - lastConnectionAttempt < RECONNECT_INTERVAL_MS) return;
   lastConnectionAttempt = millis();
 
   LedBlue();
-  Serial.print("MQTT connecting… ");
-  if (mqttClient.connect(mqtt_client_id)){
-    Serial.println("connected");
-
-    bool ok = true;
-    ok &= mqttClient.subscribe(user_update_topic);
-    ok &= mqttClient.subscribe(brightness_update_topic);
-    ok &= mqttClient.subscribe(mqtt_data_topic);
-    if (ok) LedGreen(); else LedRed();
+  Serial.print("MQTT connect "); Serial.print(MQTT_HOST); Serial.print(":"); Serial.println(MQTT_PORT);
+  bool ok=false;
+#if HAS_MQTT_AUTH
+  ok = mqttClient.connect(MQTT_CLIENTID, MQTT_USERNAME, MQTT_PASSWORD);
+#else
+  ok = mqttClient.connect(MQTT_CLIENTID);
+#endif
+  if (ok){
+    mqttClient.subscribe(user_update_topic);
+    mqttClient.subscribe(brightness_update_topic);
+    snprintf(mqtt_data_topic, sizeof(mqtt_data_topic), "%s/%d", mqtt_base_topic, LUMINAIRE_USER);
+    mqttClient.subscribe(mqtt_data_topic);
+    Serial.print("[TOPIC] Website/frames: "); Serial.println(mqtt_data_topic);
+    LedGreen();
+    publishSolidAndShow(0,0,0);
   } else {
-    Serial.print("failed, rc="); Serial.println(mqttClient.state());
+    Serial.print("MQTT fail rc="); Serial.println(mqttClient.state());
     LedRed();
   }
 }
 
-/********* IMU *********/
-void imuSetup(){
-  Wire.begin();
-  Wire.setClock(400000);
+/********* EFFECT ENGINE *********/
+unsigned long programDurationMs(){ return programIsSquare ? DURATION_SQUARE_MS : DURATION_TRIANGLE_MS; }
 
-  mpu.initialize();
-  if (!mpu.testConnection()){
-    Serial.println("MPU6050 connection FAIL");
-    while(1);
+void updateEffects(){
+  unsigned long now=millis(), dur=programDurationMs();
+  switch (effect){
+    case EFFECT_IDLE: break;
+
+    case EFFECT_SQUARE: { // PINK row-scan on WHITE for 20s
+      if (now - effectStartMs >= dur){
+        effect = EFFECT_YELLOW; chaseIdx=0; lastStepMs=0;
+        publishCmdJSON("yellow_chaser", 0, "square");
+        break;
+      }
+      if (now - lastStepMs >= SCAN_PERIOD_MS){
+        lastStepMs = now;
+        renderRowScanFrame(scanRow, 255,64,128, 255,255,255);
+        publishFrame(); setRGB(255,64,128); showLocalMirror();
+        scanRow = (scanRow + 1) % 6;
+      }
+    } break;
+
+    case EFFECT_TRIANGLE: { // BLUE column-scan on WHITE for 10s  <<< CHANGED
+      if (now - effectStartMs >= dur){
+        effect = EFFECT_YELLOW; chaseIdx=0; lastStepMs=0;
+        publishCmdJSON("yellow_chaser", 0, "triangle");
+        break;
+      }
+      if (now - lastStepMs >= SCAN_PERIOD_MS){
+        lastStepMs = now;
+        renderColScanFrame(scanCol, 0,0,255, 255,255,255);   // blue column on white
+        publishFrame(); setRGB(0,0,155); showLocalMirror();
+        scanCol = (scanCol + 1) % 12;                        // advance column 0..11
+      }
+    } break;
+
+    case EFFECT_YELLOW: { // single-pixel chaser 0..71
+      if (now - lastStepMs >= CHASE_PERIOD_MS){
+        lastStepMs = now;
+        renderChaserFrame(chaseIdx, 255,255,0);
+        publishFrame(); setRGB(255,255,0); showLocalMirror();
+        chaseIdx = (chaseIdx + 1) % NEOPIXEL_COUNT;
+      }
+    } break;
   }
-  int st = mpu.dmpInitialize();
-  if (st != 0){
-    Serial.print("DMP init fail: "); Serial.println(st);
-    while(1);
-  }
-  // Optional: some library versions have this; if it errors, keep it commented
-  // mpu.dmpSetFIFORate(50);
-
-  mpu.setDMPEnabled(true);
-
-  // Polling mode (INT optional)
-  mpu.setInterruptMode(false);
-  mpu.setInterruptDrive(false);
-  mpu.setInterruptLatch(true);
-  mpu.setInterruptLatchClear(true);
-  mpu.setIntEnabled(0x02);
-
-  packetSize = mpu.dmpGetFIFOPacketSize();
-  dmpReady   = true;
-
-  buildNormals();
-  faceChangeTime = millis();
-
-  Serial.print("DMP ready. packetSize="); Serial.println(packetSize);
 }
 
-/********* PROGRAM PREVIEW (optional) *********/
-void runProgramPreview(){
-  if (!LOCAL_PREVIEW_ON_NEOPIXEL || !programRunning) return;
-
-  unsigned long now = millis();
-  unsigned long dur = programIsSquare ? DURATION_SQUARE_MS : DURATION_TRIANGLE_MS;
-  unsigned long el  = now - programStart;
-  if (el >= dur){ programRunning = false; return; }
-
-  float t = (float)el / (float)dur; if (t<0) t=0; if (t>1) t=1;
-
-  uint8_t r=0,g=0,b=0;
-  if (programIsSquare){ r=255; g=(uint8_t)(255*t); b=0; }           // red → yellow
-  else                 { r=0;   g=(uint8_t)(255*t); b=(uint8_t)(255*(1-t)); } // blue → green
-
-  float phase = (now % BLINK_PERIOD_MS) / (float)BLINK_PERIOD_MS;
-  float env   = (phase < 0.5f) ? (phase*2.0f) : (2.0f - phase*2.0f);
-  float scale = 0.25f + 0.75f * env;
-
-  showAll((uint8_t)(r*scale),(uint8_t)(g*scale),(uint8_t)(b*scale));
-}
-
-/********* ARDUINO SETUP *********/
+/********* SETUP *********/
 void setup(){
   Serial.begin(115200);
   while(!Serial){}
 
-  // onboard RGB
-  WiFiDrv::pinMode(25, OUTPUT); // G
-  WiFiDrv::pinMode(26, OUTPUT); // R
-  WiFiDrv::pinMode(27, OUTPUT); // B
-  LedRed();
+  LedRed();  // board alive
 
-  // neopixels
+  // Local mirror
   pixels.begin();
-  pixels.show();
   pixels.setBrightness(LUMINAIRE_BRIGHTNESS);
+  pixels.show();
 
-  // MQTT config
-  mqttClient.setServer(mqtt_server, mqtt_port);
+  // MQTT setup
+  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setCallback(mqtt_callback);
+  mqttClient.setBufferSize(512);
 
-  // per-user data topic
   snprintf(mqtt_data_topic, sizeof(mqtt_data_topic), "%s/%d", mqtt_base_topic, LUMINAIRE_USER);
-  Serial.print("Data topic: "); Serial.println(mqtt_data_topic);
+  Serial.print("[TOPIC] Website/frames: "); Serial.println(mqtt_data_topic);
 
-  // WiFi + MQTT
   ensureWiFi();
   ensureMQTT();
 
   // IMU
-  imuSetup();
+  Wire.begin(); Wire.setClock(400000);
+  mpu.initialize();
+  if (!mpu.testConnection()){
+    Serial.println("MPU6050 connection FAIL");
+    while(1){ LedRed(); delay(400); LedBlue(); delay(400); }
+  }
 
   LedGreen();
+  Serial.println("Hold a face steady for 10 s to confirm. Same face is ignored next time.");
 }
 
-/********* ARDUINO LOOP *********/
+/********* LOOP *********/
 void loop(){
   ensureWiFi();
   ensureMQTT();
   mqttClient.loop();
 
-  if (!dmpReady) { runProgramPreview(); return; }
+  // ---- EFFECTS ALWAYS RUN ----
+  updateEffects();
 
-  fifoCount = mpu.getFIFOCount();
+  // ---- IMU READ ----
+  int16_t ax, ay, az; mpu.getAcceleration(&ax,&ay,&az);
+  float gx = ax/16384.0f, gy = ay/16384.0f, gz = az/16384.0f;
 
-  if (fifoCount == 1024){
-    mpu.resetFIFO();
-    Serial.println("FIFO overflow -> reset");
-    return;
+  float n2 = gx*gx + gy*gy + gz*gz;
+  if (n2 < 1e-6f){ delay(10); return; }
+  float invn = invSqrt(n2); gx*=invn; gy*=invn; gz*=invn;
+
+  // Low-pass + renormalize
+  if (!haveLPF){ gx_f=gx; gy_f=gy; gz_f=gz; haveLPF=true; }
+  else {
+    gx_f=(1.0f-LPF_ALPHA)*gx_f + LPF_ALPHA*gx;
+    gy_f=(1.0f-LPF_ALPHA)*gy_f + LPF_ALPHA*gy;
+    gz_f=(1.0f-LPF_ALPHA)*gz_f + LPF_ALPHA*gz;
+    float m2=gx_f*gx_f+gy_f*gy_f+gz_f*gz_f;
+    float invm=invSqrt(m2); gx_f*=invm; gy_f*=invm; gz_f*=invm;
   }
-  if (fifoCount < packetSize){
-    delay(2);
-    runProgramPreview();
-    return;
+
+  // --- Best face = argmax -dot(n, g) ---
+  float bestScore = -1e9f; int bestIdx=-1; bool bestIsSquare=true;
+
+  // Squares
+  for (int i=0;i<6;i++){
+    float dotv = N6[i][0]*gx_f + N6[i][1]*gy_f + N6[i][2]*gz_f;
+    float score = -dotv;
+    if (score > bestScore){ bestScore=score; bestIdx=i; bestIsSquare=true; }
+  }
+  // Triangles
+  for (int i=0;i<8;i++){
+    float dotv = N8[i][0]*gx_f + N8[i][1]*gy_f + N8[i][2]*gz_f;
+    float score = -dotv;
+    if (score > bestScore){ bestScore=score; bestIdx=i; bestIsSquare=false; }
   }
 
-  while (fifoCount >= packetSize){
-    mpu.getFIFOBytes(fifoBuffer, packetSize);
-    fifoCount -= packetSize;
-
-    // Parse orientation
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetGravity(&gravity, &q);
-    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-
-    // Serial ypr (for your reference)
-    static uint32_t lastYPR = 0;
-    uint32_t nowms = millis();
-    if (nowms - lastYPR >= 50){
-      Serial.print("ypr\t");
-      Serial.print(ypr[0]*180.0/M_PI); Serial.print('\t');
-      Serial.print(ypr[1]*180.0/M_PI); Serial.print('\t');
-      Serial.println(ypr[2]*180.0/M_PI);
-      lastYPR = nowms;
+  // Hysteresis tracking for currentFace
+  if (currentFace.idx == -1){
+    if (bestScore > ENTER_TH){
+      currentFace.isSquare=bestIsSquare; currentFace.idx=bestIdx; currentFace.score=bestScore;
     }
-
-    // Down vector (unit) is -gravity
-    float ux = -gravity.x;
-    float uy = -gravity.y;
-    float uz = -gravity.z;
-
-    // Find best face
-    int   bestIdx = -1;
-    float bestDot = -2.0f;
-    for (int i=0;i<14;i++){
-      float d = dot3(ux,uy,uz, ALL[i].x,ALL[i].y,ALL[i].z);
-      if (d > bestDot){ bestDot = d; bestIdx = i; }
-    }
-
-    // Convert bestDot to angle
-    float angleDeg = 0.0f;
-    if (bestIdx >= 0){
-      float clamped = bestDot;
-      if (clamped >  1.0f) clamped = 1.0f;
-      if (clamped < -1.0f) clamped = -1.0f;
-      angleDeg = acosf(clamped) * 180.0f / M_PI;
-    }
-
-    // Candidate validity using ENTER thresholds
-    bool candidateValid = false;
-    if (bestIdx >= 0){
-      if (ALL[bestIdx].isSquare) candidateValid = (angleDeg <= THR_SQUARE_ENTER_DEG);
-      else                       candidateValid = (angleDeg <= THR_TRI_ENTER_DEG);
-    }
-    int detectedFace = candidateValid ? bestIdx : -1;
-
-    // Report candidate changes (prints + MQTT state)
-    if (bestIdx != lastReportedFace){
-      lastReportedFace = bestIdx;
-      if (bestIdx >= 0){
-        const char* ftype = ALL[bestIdx].isSquare ? "square" : "triangle";
-        Serial.print("DOWN candidate: "); Serial.print(ALL[bestIdx].name);
-        Serial.print("  type=");  Serial.print(ftype);
-        Serial.print("  angle="); Serial.print(angleDeg, 1); Serial.print("°");
-        Serial.print("  dot=");   Serial.print(bestDot, 3);
-        Serial.print("  valid="); Serial.println(candidateValid ? "yes" : "no");
-        publishState(ALL[bestIdx].name, ftype, angleDeg, bestDot, candidateValid, faceLocked);
-      } else {
-        Serial.println("DOWN candidate: none  type=none");
-        publishState("none", "none", 0.0f, -2.0f, false, faceLocked);
-      }
-    }
-
-    // Stability + trigger logic
-    static unsigned long faceChangeLocal = millis();
-    unsigned long now = millis();
-
-    if (detectedFace != lastFace){
-      lastFace = detectedFace;
-      faceChangeLocal = now;
-      // cancel running program on movement
-      if (programRunning){
-        programRunning = false;
-      }
-      faceLocked = false;
+  } else {
+    if (bestIsSquare == currentFace.isSquare && bestIdx == currentFace.idx){
+      currentFace.score = bestScore;
     } else {
-      // Try to lock after steady time
-      if (!faceLocked && detectedFace >= 0 && (now - faceChangeLocal >= STABLE_REQUIRED_MS)){
-        faceLocked  = true;
-        currentFace = detectedFace;
-
-        programIsSquare = ALL[currentFace].isSquare;
-        programRunning  = true;
-        programStart    = now;
-
-        const char* ftype = programIsSquare ? "square" : "triangle";
-        Serial.print("LOCKED "); Serial.print(ftype);
-        Serial.print(" face ");   Serial.print(ALL[currentFace].name);
-        Serial.print("  angle="); Serial.print(angleDeg, 1); Serial.println("°");
-
-        publishState(ALL[currentFace].name, ftype, angleDeg, bestDot, true, true);
-
-        if (programIsSquare){
-          publishCmdJSON("red_yellow",  DURATION_SQUARE_MS/1000,   ALL[currentFace].name);
-        } else {
-          publishCmdJSON("blue_green", DURATION_TRIANGLE_MS/1000, ALL[currentFace].name);
-        }
-      }
-    }
-
-    // If locked, apply EXIT thresholds to decide when to unlock
-    if (faceLocked && currentFace >= 0){
-      const bool lockedIsSquare = ALL[currentFace].isSquare;
-      float exitDeg = lockedIsSquare ? THR_SQUARE_EXIT_DEG : THR_TRI_EXIT_DEG;
-
-      float d = dot3(ux,uy,uz, ALL[currentFace].x,ALL[currentFace].y,ALL[currentFace].z);
-      if (d >  1.0f) d = 1.0f;
-      if (d < -1.0f) d = -1.0f;
-      float lockedAngleDeg = acosf(d) * 180.0f / M_PI;
-
-      if (lockedAngleDeg >= exitDeg){
-        faceLocked = false;
-        programRunning = false;
-        Serial.println("Unlocked: angle exceeded EXIT threshold");
-        publishState(ALL[currentFace].name,
-                     lockedIsSquare ? "square" : "triangle",
-                     lockedAngleDeg, d, false, false);
+      if (bestScore > ENTER_TH || currentFace.score < EXIT_TH){
+        currentFace.isSquare=bestIsSquare; currentFace.idx=bestIdx; currentFace.score=bestScore;
+        belowActive = false;
       }
     }
   }
 
-  runProgramPreview(); // optional NeoPixel preview
+  // Candidate?
+  bool haveCandidate = (currentFace.idx != -1) && (currentFace.score > ENTER_TH);
+
+  // Suppress SAME face as last confirmed
+  if (haveCandidate && lastConfirmed.idx != -1 && sameFace(currentFace, lastConfirmed)){
+    dwellCandidate.idx = -1; // don't dwell on same face
+    delay(10);
+    return;
+  }
+
+  // Optional dip re-arm (kept for robustness)
+  if (lastConfirmed.idx != -1){
+    if (currentFace.score < EXIT_TH){
+      if (!belowActive){ belowActive=true; belowStartMs=millis(); }
+      else if (millis()-belowStartMs >= REARM_DROP_MS){ belowActive=false; }
+    } else { belowActive=false; }
+  }
+
+  if (!haveCandidate){
+    dwellCandidate.idx = -1;
+    delay(10);
+    return;
+  }
+
+  unsigned long nowMs = millis();
+
+  // Dwell accumulation on new/different face
+  if (dwellCandidate.idx == -1 || !sameFace(dwellCandidate, currentFace)){
+    dwellCandidate = currentFace;
+    dwellStartMs   = nowMs;
+  } else {
+    unsigned long elapsed = nowMs - dwellStartMs;
+    if (elapsed >= DWELL_MS){
+      // ------- CONFIRMED -------
+      const char* faceType = currentFace.isSquare ? "square" : "triangle";
+      const char* faceName = currentFace.isSquare ? N6name[currentFace.idx] : N8name[currentFace.idx];
+      Serial.print("[CONFIRMED 10s] "); Serial.print(faceType); Serial.print(" DOWN: ");
+      Serial.print(faceName); Serial.print("   score="); Serial.println(currentFace.score, 3);
+      publishState(faceName, faceType, currentFace.score, true, true);
+
+      // Start the program for this face (scan then yellow chaser)
+      programIsSquare = currentFace.isSquare;
+      programRunning  = true;
+      programStart    = nowMs;
+      lastStepMs      = 0;
+      if (programIsSquare){
+        scanRow = 0;
+        effect = EFFECT_SQUARE; effectStartMs = nowMs;
+        publishCmdJSON("pink_white_rowscan", DURATION_SQUARE_MS/1000, faceName);
+      } else {
+        scanCol = 0;  // start at first column
+        effect = EFFECT_TRIANGLE; effectStartMs = nowMs;
+        publishCmdJSON("blue_white_colscan", DURATION_TRIANGLE_MS/1000, faceName); // label updated
+      }
+
+      // Remember last confirmed to suppress same-face re-trigger
+      lastConfirmed = currentFace;
+
+      // Immediately re-arm: reset dwell so a DIFFERENT face can accumulate
+      dwellCandidate.idx = -1;
+    }
+  }
+
+  delay(10);
 }
