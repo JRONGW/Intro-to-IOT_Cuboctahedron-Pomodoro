@@ -8,6 +8,21 @@
 - It connects physical interaction, edge computing, event-driven networks and visualization into a closed loop.
 - Edge-side filtering + hysteresis + dwell time can eliminate "false triggering" at the device end and reduce the noise of uplink data (the value of edge computing).
 
+###  Robustness
+####  Unit-vector normalization + zero-guard: 
+- I compute n2 and bail if it’s ≈0, then normalize → prevents NaNs and ensures stable dot products. If I don’t normalize the accelerometer vector, the direction test gets contaminated by magnitude, which breaks your thresholds, hysteresis, and dwell logic. Because the thresholds are set assuming that the n2 is normalized
+####  LPF + re-normalize: 
+- exponential smoothing (LPF_ALPHA) damps jitter; re-normalizing keeps math stable.
+####  Hysteresis (ENTER_TH/EXIT_TH): 
+- avoids flicker when the score hovers near the threshold.
+####  10-second dwell confirmation (DWELL_MS): 
+- suppresses false triggers from bumps.
+####  Re-arm dip (REARM_DROP_MS)
+- After confirming a face, don’t consider any new face until the current face’s score has dipped below a lower threshold (EXIT_TH) for at least REARM_DROP_MS milliseconds.
+#####  Last-confirmed suppression: 
+- ignores the same face immediately after confirming it to prevent repeats.
+
+
 ### Demerits
 - The function of the pomodoro needs to be explained to the user. 
 
