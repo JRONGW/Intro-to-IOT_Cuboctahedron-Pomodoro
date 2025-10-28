@@ -1,3 +1,18 @@
+// This sketch is a hardware/debug probe for  MPU-6050 DATA_RDY interrupt and I²C wiring. It checks three things:
+// What it sets up
+  // I²C comms to the MPU-6050 at address 0x68 (change to 0x69 if AD0=HIGH).
+  // INT pin behavior on the MPU:
+  // Enables DATA_RDY interrupt (INT_ENABLE = 0x01).
+  // Tries to set: active-HIGH, push-pull, latched until cleared, clear-on-INT_STATUS read (via the library calls).
+  // MCU interrupt line: connects MPU’s INT pin → MKR1010 D2, and attaches attachInterrupt(..., RISING) to catch edges.
+// What it prints (and why)
+  // On setup() it reads key registers directly (even if the lib lacks getByte):
+  // WHO_AM_I → should be 0x68 (or 0x69 depending on variant).
+  // PWR_MGMT_1 → expect 0x00 if not sleeping.
+  // INT_ENABLE → expect 0x01 (DATA_RDY enabled).
+  // INT_PIN_CFG → shows pin config bits (latch, polarity, etc.).
+
+
 #include <Wire.h>
 #include "MPU6050.h"   // use the one you already have
 

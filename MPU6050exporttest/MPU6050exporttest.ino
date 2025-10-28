@@ -1,4 +1,20 @@
-//This tests printing the ypr angles from MPU-6050
+// I²C wiring & power
+//   Wire.begin(); Wire.setClock(400000); mpu.initialize(); mpu.testConnection()
+//   → Confirms the chip responds on I²C (0x68/0x69) at 400 kHz.
+// DMP firmware load & configuration
+//   mpu.dmpInitialize(); mpu.setDMPEnabled(true); packetSize = mpu.dmpGetFIFOPacketSize();
+//   → Ensures the on-chip DMP successfully boots and outputs fixed-size packets (typically 42 bytes).
+// FIFO health
+//   fifoCount = mpu.getFIFOCount(); ... if (fifoCount == 1024) resetFIFO();
+//   → Checks for overflows
+// Quaternion → gravity → YPR math
+//   dmpGetQuaternion(&q, fifoBuffer);
+//   dmpGetGravity(&gravity, &q);
+//   dmpGetYawPitchRoll(ypr, &q, &gravity);
+//   → Confirms the DMP orientation solution is coherent and  derives yaw, pitch, roll.
+// Streaming/throughput check
+//   Prints YPR at ~20 Hz (if (now - last >= 50)) to make sure Serial USB isn’t the bottleneck.
+
 
 #include <Wire.h>
 #include "MPU6050_6Axis_MotionApps20.h"  // Rowberg DMP header
@@ -34,7 +50,7 @@ void setup() {
   }
 
   // (Optional but helps) lower DMP FIFO rate to reduce overflow if available
-  //mpu.dmpSetFIFORate(50);
+  // mpu.dmpSetFIFORate(50); // 50 Hz; comment out if your header lacks this
 
   mpu.setDMPEnabled(true);
 

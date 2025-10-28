@@ -91,6 +91,7 @@ struct FaceState {
 static inline float invSqrt(float x) {
   return 1.0f / sqrtf(x);
 }
+//function to detect if it is on the same face
 static inline bool sameFace(const FaceState& a, const FaceState& b) {
   return (a.idx == b.idx) && (a.isSquare == b.isSquare);
 }
@@ -109,11 +110,11 @@ unsigned long belowStartMs = 0;
 bool belowActive = false;
 
 /********* Effect program *********/
-const unsigned long DURATION_SQUARE_MS = 20000UL;
-const unsigned long DURATION_TRIANGLE_MS = 10000UL;
+const unsigned long DURATION_SQUARE_MS = 20000UL; // 20 seconds
+const unsigned long DURATION_TRIANGLE_MS = 10000UL; // 10 seconds
 
-const unsigned long SCAN_PERIOD_MS = 150UL;
-const unsigned long CHASE_PERIOD_MS = 80UL;
+const unsigned long SCAN_PERIOD_MS = 150UL; // every 150 ms advance row/column
+const unsigned long CHASE_PERIOD_MS = 80UL;  // every 80 ms advance chaser
 
 bool programRunning = false, programIsSquare = false;
 unsigned long programStart = 0, effectStartMs = 0;
@@ -199,53 +200,11 @@ public:
     }
   }
 
-  // Light `count` pixels evenly across the 72-LED ring, with a→b gradient.
-  // startOffset shifts the whole pattern around the ring.
-  static void evenlySpacedGradient1D(int startOffset, int count,
-                                     const Color& a, const Color& b) {
-    fillSolid(0, 0, 0);
-    if (count < 1) return;
-
-    // choose indices: floor(n * 72 / count) gives evenly distributed slots
-    for (int n = 0; n < count; ++n) {
-      int idx0 = (int)((long)n * NEOPIXEL_COUNT / count);  // 0..71, even spacing
-      int idx = (idx0 + startOffset) % NEOPIXEL_COUNT;
-
-      float t = (count > 1) ? (float)n / (float)(count - 1) : 0.0f;  // 0..1
-      Color c = lerp(a, b, t);                                       // light blue → black
-
-      frameBuf[idx * 3 + 0] = c.r;
-      frameBuf[idx * 3 + 1] = c.g;
-      frameBuf[idx * 3 + 2] = c.b;
-    }
-  }
-
-
-  // Light `count` pixels on the 1-D strip, spaced by `gap` LEDs.
-  // startIdx: first LED index (0..71)
-  // If useGradient=true, color blends a→b along the sequence; otherwise all use `a`.
-  static void spacedSequence(int startIdx, int count, int gap,
-                             const Color& a, const Color& b,
-                             bool useGradient = true) {
-    fillSolid(0, 0, 0);
-    if (count < 1) return;
-    if (gap < 1) gap = 1;
-
-    for (int n = 0; n < count; ++n) {
-      int idx = (startIdx + n * gap) % NEOPIXEL_COUNT;
-      float t = (count > 1) ? (float)n / (float)(count - 1) : 0.0f;
-      Color c = useGradient ? lerp(a, b, t) : a;
-
-      frameBuf[idx * 3 + 0] = c.r;
-      frameBuf[idx * 3 + 1] = c.g;
-      frameBuf[idx * 3 + 2] = c.b;
-    }
-  }
 
 
   static inline int idxFromRowCol(int r, int c) {
     return c * 6 + r;
-  }  // 6 rows × 12 cols
+  }  // 6 rows × 12 cols finding index from row and col number
 
   // Row blink-through: background = ROW gradient (WHITE->bgTarget); active row = lerp(a,b,t)
   static void rowBlinkThrough(int r, const Color& a, const Color& b, const Color& bgTarget, float t) {
@@ -275,30 +234,6 @@ public:
   }
 
 
-  // Column blink-through: background = row gradient (WHITE->bgTarget); active col = lerp(a,b,t)
-  static void colBlinkThrough(int c, const Color& a, const Color& b, const Color& bgTarget, float t) {
-    if (c < 0) c = 0;
-    if (c > 11) c = 11;
-
-    for (int r = 0; r < 6; r++) {
-      float tr = 5 ? (float)r / 5.0f : 0.0f;
-      Color cc = lerp(WHITE, bgTarget, tr);
-      for (int ccx = 0; ccx < 12; ccx++) {
-        int i = idxFromRowCol(r, ccx);
-        frameBuf[i * 3 + 0] = cc.r;
-        frameBuf[i * 3 + 1] = cc.g;
-        frameBuf[i * 3 + 2] = cc.b;
-      }
-    }
-    Color kc = lerp(a, b, t);
-    for (int r = 0; r < 6; r++) {
-      int i = idxFromRowCol(r, c);
-      frameBuf[i * 3 + 0] = kc.r;
-      frameBuf[i * 3 + 1] = kc.g;
-      frameBuf[i * 3 + 2] = kc.b;
-    }
-  }
-
   // X-pixel gradient chaser window; black elsewhere
   static void chaserWindow(int startIdx, int window, const Color& a, const Color& b) {
     fillSolid(0, 0, 0);
@@ -315,7 +250,7 @@ public:
 
 
 
-  // One pixel per column with a vertical halo in that same column.
+  // One pixel per column with a vertical halo in that same column. same colour on a diagonal
   // windowCols: how many consecutive columns to draw (use 12 for all)
   // radius: how many rows above/below to fade (e.g. 4 -> total height <= 1+2*4)
   static void veeredSinglePerColGradient(int startCol, int windowCols,
@@ -331,7 +266,7 @@ public:
       const int centerR = ((baseRow + k * veer) % 6 + 6) % 6;  // center row 0..5
 
       // Same color for the whole diagonal (no gradient along columns)
-      const Color colCenter = a;  // e.g., light blue
+      const Color colCenter = a;  
 
 
       // paint center
@@ -506,6 +441,7 @@ void ensureMQTT() {
 }
 
 /********* EFFECT ENGINE *********/
+// determine the blinking time by the boolean whether the face facing down is square or not
 unsigned long programDurationMs() {
   return programIsSquare ? DURATION_SQUARE_MS : DURATION_TRIANGLE_MS;
 }
@@ -574,7 +510,7 @@ void updateEffects() {
 
           static unsigned long animStart = millis();
           unsigned long steps = (now - animStart) / COL_PERIOD_MS;
-          int startCol = steps % 12;
+          int startCol = steps % WINDOW_COLS;
           int baseRow  = (steps / DRIFT_EVERY) % 6;
 
           // light blue → black across columns, one pixel per column
@@ -591,14 +527,21 @@ void updateEffects() {
 
 
     case EFFECT_YELLOW:
-      {  // 6-pixel gradient window chaser; alternates light-blue ↔ black each lap
+      {  // gradient window chaser;
         if (now - lastStepMs >= CHASE_PERIOD_MS) {
           lastStepMs = now;
+          //Runs one “step” every CHASE_PERIOD_MS milliseconds (non-blocking timing using millis())
 
-          // Alternate gradient direction between light blue → black and black → light blue
+          // gradient direction black → light yellow  → black 
+          //If chaseFlip == false: gradient is A → B across the pixels.
+          //If chaseFlip == true: gradient is B → A (reversed).
           const Color cA = chaseFlip ? GRAD_CHASE_B : GRAD_CHASE_A;
           const Color cB = chaseFlip ? GRAD_CHASE_A : GRAD_CHASE_B;
 
+          //Clears the frame to black, then lights 5 consecutive 
+          //LEDs starting at chaseIdx.
+          //Within that 5-pixel window, color smoothly blends 
+          //from cA to cB (or vice-versa if flipped)
           FX::chaserWindow(chaseIdx, 5, cA, cB);
           publishFrame();
 
@@ -606,9 +549,12 @@ void updateEffects() {
           setRGB(cB.r, cB.g, cB.b);
           showLocalMirror();
 
+          //Moves the 5-pixel window forward by 1 LED (wraps at 72).
+          //When chaseIdx wraps back to 0 (one full loop), invert chaseFlip 
+          //so the gradient direction reverses on the next lap.
           chaseIdx = (chaseIdx + 1) % NEOPIXEL_COUNT;
 
-          // Flip once per full lap (change cadence if you prefer)
+          // Flip once per full lap
           if (chaseIdx == 0) chaseFlip = !chaseFlip;
         }
       }
@@ -668,28 +614,52 @@ void loop() {
   // ---- IMU READ ----
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
-  float gx = ax / 16384.0f, gy = ay / 16384.0f, gz = az / 16384.0f;
+  //When the accelerometer is configured at ±2 g range, 
+  //its sensitivity is 16 384 Least Significant Bit per g. 
+  //Dividing the raw readings (ax, ay, az) by 16384.0f
+  //converts them from raw counts to g units 
+  //(so a stationary device might read ≈ (0, 0, 1)).🦜
+  float gx = ax / 16384.0f, gy = ay / 16384.0f, gz = az / 16384.0f; 
 
+
+
+  //Following is a safety check.
+  //If the squared length is near zero, it means the vector 
+  //is almost zero — maybe a bad reading, disconnected sensor, 
+  //or free-fall (no gravity detected).
+  //Instead of dividing by zero (which would produce NaN), 
+  //it just waits a bit and skips the update.
   float n2 = gx * gx + gy * gy + gz * gz;
   if (n2 < 1e-6f) {
     delay(10);
     return;
   }
+
+
   float invn = invSqrt(n2);
   gx *= invn;
   gy *= invn;
-  gz *= invn;
+  gz *= invn; 
+  // now ||(gx,gy,gz)|| = 1, 
+  //After this, (gx, gy, gz) is a unit gravity direction vector.
 
   // Low-pass + renormalize
+  // Low-pass = smoothing: It removes high-frequency 
+  // jitter/noise and short bumps from the accelerometer 
+  // so the “which face is down” logic doesn’t flicker.
+  // LPF_ALPHA is the smoothing factor.
   if (!haveLPF) {
     gx_f = gx;
     gy_f = gy;
     gz_f = gz;
     haveLPF = true;
   } else {
+    // 1) Low-pass (EMA / IIR(1))
     gx_f = (1.0f - LPF_ALPHA) * gx_f + LPF_ALPHA * gx;
     gy_f = (1.0f - LPF_ALPHA) * gy_f + LPF_ALPHA * gy;
     gz_f = (1.0f - LPF_ALPHA) * gz_f + LPF_ALPHA * gz;
+
+    // 2) Re-normalize to unit length
     float m2 = gx_f * gx_f + gy_f * gy_f + gz_f * gz_f;
     float invm = invSqrt(m2);
     gx_f *= invm;
@@ -697,13 +667,16 @@ void loop() {
     gz_f *= invm;
   }
 
-  // --- Best face = argmax -dot(n, g) ---
+  // Best face = argmax -dot(n, g)
   float bestScore = -1e9f;
   int bestIdx = -1;
   bool bestIsSquare = true;
 
   // Squares
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 6; i++) { 
+    //find the one with the largest -dot(n, g)
+    //n are the vectors for square faces down mode,
+    //g is the acceleration from the sensor
     float dotv = N6[i][0] * gx_f + N6[i][1] * gy_f + N6[i][2] * gz_f;
     float score = -dotv;
     if (score > bestScore) {
@@ -713,7 +686,10 @@ void loop() {
     }
   }
   // Triangles
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 8; i++) { 
+    //find the one with the largest -dot(n, g)
+    //n are the vectors for triangle faces down mode,
+    //g is the acceleration from the sensor
     float dotv = N8[i][0] * gx_f + N8[i][1] * gy_f + N8[i][2] * gz_f;
     float score = -dotv;
     if (score > bestScore) {
@@ -753,7 +729,7 @@ void loop() {
     return;
   }
 
-  // Optional dip re-arm (robustness)
+  // dip re-arm (robustness)
   if (lastConfirmed.idx != -1) {
     if (currentFace.score < EXIT_TH) {
       if (!belowActive) {
@@ -775,14 +751,13 @@ void loop() {
 
   unsigned long nowMs = millis();
 
-  // Dwell accumulation on new/different face
+  // Dwell accumulation on new different face
   if (dwellCandidate.idx == -1 || !sameFace(dwellCandidate, currentFace)) {
     dwellCandidate = currentFace;
     dwellStartMs = nowMs;
   } else {
     unsigned long elapsed = nowMs - dwellStartMs;
     if (elapsed >= DWELL_MS) {
-      // ------- CONFIRMED -------
       const char* faceType = currentFace.isSquare ? "square" : "triangle";
       const char* faceName = currentFace.isSquare ? N6name[currentFace.idx] : N8name[currentFace.idx];
       Serial.print("[CONFIRMED 10s] ");
@@ -813,7 +788,6 @@ void loop() {
         publishCmdJSON("col_temporal_grad", DURATION_TRIANGLE_MS / 1000, faceName);
       }
 
-      // Remember last confirmed to suppress same-face re-trigger
       lastConfirmed = currentFace;
 
       // Immediately re-arm for different face
