@@ -19,7 +19,7 @@
 - suppresses false triggers from bumps.
 ####  Re-arm dip (REARM_DROP_MS)
 - After confirming a face, don’t consider any new face until the current face’s score has dipped below a lower threshold (EXIT_TH) for at least REARM_DROP_MS milliseconds.
-#####  Last-confirmed suppression: 
+####  Last-confirmed suppression: 
 - ignores the same face immediately after confirming it to prevent repeats.
 
 
