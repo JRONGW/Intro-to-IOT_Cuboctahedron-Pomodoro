@@ -2,6 +2,8 @@
 
 <img width="3508" height="2480" alt="A4 cuboctahedron" src="https://github.com/user-attachments/assets/4d2e69e6-a9f6-42c0-9407-53acfa2cd62a" />
 
+- The core functionality of the Cuboctahedron Pomodoro is the use it as a timer for work and rest. Cuboctahedron is a symmetrical geometry representing the bi-mode of this pomodoro with its 6 identical squares and 8 identical triangles. The larger square surface down sets a 25min clock for work. The smaller triangle surface down sets a 5min clock for rest. In the testing, I use the 20s as a substitution for 25min clock and 10s as a substitution for 5min clock. 
+
 ### Merits
 - It connects physical interaction, edge computing, event-driven networks and visualization into a closed loop.
 - Edge-side filtering + hysteresis + dwell time can eliminate "false triggering" at the device end and reduce the noise of uplink data (the value of edge computing).
