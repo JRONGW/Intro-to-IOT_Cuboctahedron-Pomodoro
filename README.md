@@ -31,16 +31,16 @@ Robustness
 - The function of the pomodoro needs to be explained to the user.
 
 ### Message to MQTT
-- 1) 72-LED frame bytes (binary)
-- Topic: student/CASA0014/luminaire/<user>
-- (built into mqtt_data_topic as "%s/%d" % (mqtt_base_topic, LUMINAIRE_USER))
-- Payload: raw binary buffer frameBuf of length 216 bytes (= 72 LEDs × 3 bytes per LED).
-- Format per LED: GRB order (that’s how NeoPixel expects it):
-- [G0, R0, B0,  G1, R1, B1,  ...  G71, R71, B71]
-- When sent: every time  call publishFrame() from  effect loops.
-- It shows as a blob of bytes that can be toggled to hex
+#### 1)72-LED frame bytes (binary)
+ - Topic: student/CASA0014/luminaire/<user>
+ - (built into mqtt_data_topic as "%s/%d" % (mqtt_base_topic, LUMINAIRE_USER))
+ - Payload: raw binary buffer frameBuf of length 216 bytes (= 72 LEDs × 3 bytes per LED).
+ - Format per LED: GRB order (that’s how NeoPixel expects it):
+ - [G0, R0, B0,  G1, R1, B1,  ...  G71, R71, B71]
+ - When sent: every time  call publishFrame() from  effect loops.
+ - It shows as a blob of bytes that can be toggled to hex
 
-- 2) JSON “telemetry/commands” for status/timer
+#### 2)JSON “telemetry/commands” for status/timer
 - These are the two snprintf(...) payloads you still publish to mqtt_cmd_topic:
 - Timer/transition message (called in updateEffects() when switching modes):
  - Example payload:
@@ -49,7 +49,7 @@ Robustness
 - State/lock message (sent on 10-second confirmation):
  -  {"device":"MKR1010_Cubo_FaceEffects","cmd":"state","face":"+X","type":"square","score":0.913,"valid":true,"locked":true}
 
-- 3) Control inputs to listen for: /user and /brightness (plain numbers).
+#### 3)Control inputs to listen for: /user and /brightness (plain numbers).
 
 
 ### Design
