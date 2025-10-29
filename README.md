@@ -13,24 +13,44 @@
 ### Merits
 - It connects physical interaction, edge computing, event-driven networks and visualization into a closed loop.
 - Edge-side filtering + hysteresis + dwell time can eliminate "false triggering" at the device end and reduce the noise of uplink data (the value of edge computing).
-
-###  Robustness
-####  Unit-vector normalization + zero-guard: 
+Robustness
+####  Robustness1: Unit-vector normalization + zero-guard: 
 - I compute n2 and bail if it’s ≈0, then normalize → prevents NaNs and ensures stable dot products. If I don’t normalize the accelerometer vector, the direction test gets contaminated by magnitude, which breaks your thresholds, hysteresis, and dwell logic. Because the thresholds are set assuming that the n2 is normalized
-####  LPF + re-normalize: 
+####  Robustness2: LPF + re-normalize: 
 - exponential smoothing (LPF_ALPHA) damps jitter; re-normalizing keeps math stable.
-####  Hysteresis (ENTER_TH/EXIT_TH): 
+####  Robustness3: Hysteresis (ENTER_TH/EXIT_TH): 
 - avoids flicker when the score hovers near the threshold.
-####  10-second dwell confirmation (DWELL_MS): 
+####  Robustness4: 10-second dwell confirmation (DWELL_MS): 
 - suppresses false triggers from bumps.
-####  Re-arm dip (REARM_DROP_MS)
+####  Robustness5: Re-arm dip (REARM_DROP_MS)
 - After confirming a face, don’t consider any new face until the current face’s score has dipped below a lower threshold (EXIT_TH) for at least REARM_DROP_MS milliseconds.
-####  Last-confirmed suppression: 
+####  Robustness6: Last-confirmed suppression: 
 - ignores the same face immediately after confirming it to prevent repeats.
 
-
 ### Demerits
-- The function of the pomodoro needs to be explained to the user. 
+- The function of the pomodoro needs to be explained to the user.
+
+### Message to MQTT
+- 1) 72-LED frame bytes (binary)
+- Topic: student/CASA0014/luminaire/<user>
+- (built into mqtt_data_topic as "%s/%d" % (mqtt_base_topic, LUMINAIRE_USER))
+- Payload: raw binary buffer frameBuf of length 216 bytes (= 72 LEDs × 3 bytes per LED).
+- Format per LED: GRB order (that’s how NeoPixel expects it):
+- [G0, R0, B0,  G1, R1, B1,  ...  G71, R71, B71]
+- When sent: every time  call publishFrame() from  effect loops.
+- It shows as a blob of bytes that can be toggled to hex
+
+- 2) JSON “telemetry/commands” for status/timer
+- These are the two snprintf(...) payloads you still publish to mqtt_cmd_topic:
+- Timer/transition message (called in updateEffects() when switching modes):
+ - Example payload:
+ - {"device":"MKR1010_Cubo_FaceEffects","cmd":"timer","palette":"row_temporal_grad","seconds":20,"face":"+X"}
+ - {"device":"MKR1010_Cubo_FaceEffects","cmd":"timer","palette":"grad_chaser","seconds":0,"face":"square"}
+- State/lock message (sent on 10-second confirmation):
+ -  {"device":"MKR1010_Cubo_FaceEffects","cmd":"state","face":"+X","type":"square","score":0.913,"valid":true,"locked":true}
+
+- 3) Control inputs to listen for: /user and /brightness (plain numbers).
+
 
 ### Design
 - The design follows the design principle that form follows functions in architecture. This geometry works as an abstract switch with correspondence from shape to time. 
