@@ -37,16 +37,26 @@ static const char* MQTT_CLIENTID = "MKR1010_Cubo_FaceEffects";
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
+String cmdTopic;
+
 /********* Topics *********/
-const char* mqtt_cmd_topic = "student/CASA0014/luminaire/cmd";
+
+
 const char* mqtt_base_topic = "student/CASA0014/luminaire";
 const char* user_update_topic = "student/CASA0014/luminaire/user";
 const char* brightness_update_topic = "student/CASA0014/luminaire/brightness";
+
 
 /********* User & local-mirror *********/
 int LUMINAIRE_USER = 25;         // change if needed
 int LUMINAIRE_BRIGHTNESS = 150;  // 0..255 (local mirror only)
 char mqtt_data_topic[64];        // student/CASA0014/luminaire/<user>
+
+
+
+char mqtt_cmd_topic[96];
+
+
 
 /********* Website “virtual strip” *********/
 #define NEOPIXEL_COUNT 72
@@ -385,6 +395,11 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       mqttClient.unsubscribe(mqtt_data_topic);
       snprintf(mqtt_data_topic, sizeof(mqtt_data_topic), "%s/%d", mqtt_base_topic, LUMINAIRE_USER);
       mqttClient.subscribe(mqtt_data_topic);
+
+      mqttClient.unsubscribe(mqtt_cmd_topic);
+      snprintf(mqtt_cmd_topic, sizeof(mqtt_cmd_topic), "%s/%d/cmd", "student/CASA0014/luminaire", LUMINAIRE_USER);
+      mqttClient.subscribe(mqtt_cmd_topic);
+
       Serial.print("[TOPIC] -> ");
       Serial.println(mqtt_data_topic);
       publishSolidAndShow(0, 0, 0);  // clear on change
