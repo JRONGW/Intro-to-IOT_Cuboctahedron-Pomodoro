@@ -13,6 +13,7 @@
 
 #include <SPI.h>
 #include <WiFiNINA.h>
+#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 #include <utility/wifi_drv.h>
@@ -91,6 +92,11 @@ const float EXIT_TH = 0.72f;
 const float LPF_ALPHA = 0.20f;
 const unsigned long DWELL_MS = 10000UL;  // 10 s confirm
 const unsigned long REARM_DROP_MS = 800UL;
+
+// at top-level (near other globals)
+unsigned long animStartTriangle = 0;
+
+
 
 struct FaceState {
   bool isSquare;
@@ -183,12 +189,21 @@ const Color WHITE = { 255, 255, 255 };
 const Color GRAD_ROW_A = { 0xFC, 0x99, 0xFF };  // #FC99FF
 const Color GRAD_ROW_B = { 0xFF, 0xA7, 0x4F };  // #FFA74F
 
+const Color GRAD_BG_A = {0xF8, 0x9B, 0x29}; // #F89B29 (top)
+const Color GRAD_BG_B = {0xE7, 0x61, 0xBD}; // #E761BD (bottom)
+
+
 const Color GRAD_COL_A = { 0xCA, 0xD0, 0xFF };  // #CAD0FF
 const Color GRAD_COL_B = { 0xE0, 0xF4, 0xFF };  // #E0F4FF
 
 // Chaser endpoints (light blue ↔ black)
-const Color GRAD_CHASE_B = { 0xF8, 0xFF, 0xBD };  // #f8ffbd
+const Color GRAD_CHASE_B = { 0xE1, 0xA9, 0x5F };  // #E1A95F
 const Color GRAD_CHASE_A = { 0x00, 0x00, 0x00 };  // black
+
+// gradient for triangle surface
+const Color BG_LR_A = {0x83, 0xF5, 0xE5}; // #83F5E5
+const Color BG_LR_B = {0xE7, 0x61, 0xBD}; // #E761BD
+
 
 class FX {
 public:
@@ -243,6 +258,43 @@ public:
     }
   }
 
+  // Progressive background fill (top → bottom):
+  // - Rows [0 .. rowsToFill-1] show the top→bottom gradient color for that row.
+  // - Rows [rowsToFill .. 5] remain WHITE (not yet revealed).
+  // Then overlay the active blink row 'r'.
+  static void rowBlinkThroughProgressive(int r, const Color& a, const Color& b, float t, int rowsToFill) {
+    if (r < 0) r = 0;
+    if (r > 5) r = 5;
+    if (rowsToFill < 0) rowsToFill = 0;
+    if (rowsToFill > 6) rowsToFill = 6;
+
+    for (int rr = 0; rr < 6; rr++) {
+      // Compute the per-row gradient factor (top=0 → bottom=1)
+      float tr = (6 > 1) ? (float)rr / 5.0f : 0.0f;
+
+      // If this row is already "revealed", use its gradient color; else keep white
+      Color rowColor = (rr < rowsToFill) ? lerp(GRAD_BG_A, GRAD_BG_B, tr) : WHITE;
+
+      // Paint the whole row with that color
+      for (int c = 0; c < 12; c++) {
+        int i = idxFromRowCol(rr, c);
+        frameBuf[i * 3 + 0] = rowColor.r;
+        frameBuf[i * 3 + 1] = rowColor.g;
+        frameBuf[i * 3 + 2] = rowColor.b;
+      }
+    }
+
+    // Overlay active row with the blink color (uniform across the row)
+    Color rc = lerp(a, b, t);
+    for (int c = 0; c < 12; c++) {
+      int i = idxFromRowCol(r, c);
+      frameBuf[i * 3 + 0] = rc.r;
+      frameBuf[i * 3 + 1] = rc.g;
+      frameBuf[i * 3 + 2] = rc.b;
+    }
+  }
+
+
 
   // X-pixel gradient chaser window; black elsewhere
   static void chaserWindow(int startIdx, int window, const Color& a, const Color& b) {
@@ -255,6 +307,76 @@ public:
       frameBuf[i * 3 + 0] = cc.r;
       frameBuf[i * 3 + 1] = cc.g;
       frameBuf[i * 3 + 2] = cc.b;
+    }
+  }
+
+  static inline Color toGray(const Color& c) {
+    // sRGB luminance approximation
+    uint8_t y = (uint8_t)((0.2126f * c.r) + (0.7152f * c.g) + (0.0722f * c.b) + 0.5f);
+    return { y, y, y };
+  }
+
+
+  // Colored stripe uses a LEFT→RIGHT palette (#83F5E5 → #E761BD).
+  // Background stays BLACK.
+  static void veeredSinglePerColGradientProgressive(int startCol, int windowCols,
+                                                    int baseRow, int veer,
+                                                    const Color& centerFallback, // unused, kept for compat
+                                                    const Color& haloTarget,     // pass BLACK to fade to black
+                                                    int radius,
+                                                    int colsToReveal) {
+    if (windowCols < 1) windowCols = 1;
+    if (radius < 0) radius = 0;
+    if (colsToReveal < 0) colsToReveal = 0;
+    if (colsToReveal > 12) colsToReveal = 12;
+
+    // 0) Background stays black
+    FX::fillSolid(0, 0, 0);
+
+    // 1) Draw veered stripe + vertical halo, column by column
+    for (int k = 0; k < windowCols; ++k) {
+      const int c = (startCol + k) % 12;                       // 0..11
+      const int centerR = ((baseRow + k * veer) % 6 + 6) % 6;  // 0..5
+
+      // Palette color for THIS column along #83F5E5 → #E761BD
+      float tc = (12 > 1) ? (float)c / 11.0f : 0.0f;
+      Color colCenterBase = FX::lerp(BG_LR_A, BG_LR_B, tc);
+
+      // Reveal rule: if column not yet revealed, use greyscale of the color
+      const bool revealed = (c < colsToReveal);
+      Color colCenter = revealed ? colCenterBase : FX::toGray(colCenterBase);
+
+      // Paint center pixel
+      {
+        int i = FX::idxFromRowCol(centerR, c);
+        frameBuf[i * 3 + 0] = colCenter.r;
+        frameBuf[i * 3 + 1] = colCenter.g;
+        frameBuf[i * 3 + 2] = colCenter.b;
+      }
+
+      // Paint symmetric vertical halo within the same column
+      if (radius > 0) {
+        for (int d = 1; d <= radius; ++d) {
+          float tHalo = (float)d / (float)radius;                  // 0→1
+          Color haloBase = FX::lerp(colCenterBase, haloTarget, tHalo);
+          Color halo = revealed ? haloBase : FX::toGray(haloBase);
+
+          int rUp = centerR - d;
+          if (rUp >= 0) {
+            int iUp = FX::idxFromRowCol(rUp, c);
+            frameBuf[iUp * 3 + 0] = halo.r;
+            frameBuf[iUp * 3 + 1] = halo.g;
+            frameBuf[iUp * 3 + 2] = halo.b;
+          }
+          int rDn = centerR + d;
+          if (rDn <= 5) {
+            int iDn = FX::idxFromRowCol(rDn, c);
+            frameBuf[iDn * 3 + 0] = halo.r;
+            frameBuf[iDn * 3 + 1] = halo.g;
+            frameBuf[iDn * 3 + 2] = halo.b;
+          }
+        }
+      }
     }
   }
 
@@ -481,8 +603,14 @@ void updateEffects() {
         if (now - lastStepMs >= SCAN_PERIOD_MS) {
           lastStepMs = now;
 
-          // draw + publish
-          FX::rowBlinkThrough(scanRow, GRAD_ROW_A, GRAD_ROW_B, GRAD_ROW_B, 0.5);
+          // --- How many rows should show the background gradient so far? (0..6)
+          const uint32_t stepMs = DURATION_SQUARE_MS / 7UL;
+          uint32_t elapsed = now - effectStartMs;
+          int rowsToFill = (elapsed >= DURATION_SQUARE_MS) ? 7 : (int)(elapsed / stepMs);
+          rowsToFill = rowsToFill < 0 ? 0 : (rowsToFill > 7 ? 7 : rowsToFill);
+
+          // --- draw + publish (top→bottom progressive background)
+          FX::rowBlinkThroughProgressive(scanRow, GRAD_ROW_A, GRAD_ROW_B, 0.5f, rowsToFill);
           
           publishFrame();
           setRGB(GRAD_ROW_A.r, GRAD_ROW_A.g, GRAD_ROW_A.b);
@@ -523,14 +651,25 @@ void updateEffects() {
           const int      WINDOW_COLS   = 12;  // one pixel in every column
           const int      VEER          = 1;   // +1 = down-right, use -1 to flip
 
-          static unsigned long animStart = millis();
-          unsigned long steps = (now - animStart) / COL_PERIOD_MS;
+          unsigned long steps = (now - animStartTriangle) / COL_PERIOD_MS;
           int startCol = steps % WINDOW_COLS;
           int baseRow  = (steps / DRIFT_EVERY) % 6;
 
-          // light blue → black across columns, one pixel per column
-          FX::veeredSinglePerColGradient(startCol, WINDOW_COLS, baseRow, VEER,
-                                        GRAD_COL_A, GRAD_CHASE_A /* black */);
+          // 13 slices: 0..12 (0 = all white)
+          const uint32_t stepMs = DURATION_TRIANGLE_MS / 13UL; // 13 slices: 0..12
+          uint32_t elapsed = now - effectStartMs;
+          int colsToReveal = (elapsed >= DURATION_TRIANGLE_MS) ? 12 : (int)(elapsed / stepMs);
+          colsToReveal = colsToReveal < 0 ? 0 : (colsToReveal > 12 ? 12 : colsToReveal);
+
+          // Draw (fade halo toward BLACK so it blends to background)
+          FX::veeredSinglePerColGradientProgressive(
+            startCol, WINDOW_COLS, baseRow, VEER,
+            GRAD_ROW_A, /*centerFallback, ignored*/ 
+            Color{0,0,0}, /*haloTarget = BLACK*/ 
+            /*radius=*/4,
+            colsToReveal
+          );
+
 
           publishFrame();
           showLocalMirror();
@@ -599,6 +738,9 @@ void setup() {
   ensureWiFi();
   ensureMQTT();
 
+  ArduinoOTA.begin(WiFi.localIP(), "MKR1010", "otapass", InternalStorage);
+
+
   // IMU
   Wire.begin();
   Wire.setClock(400000);
@@ -620,6 +762,8 @@ void setup() {
 /********* LOOP *********/
 void loop() {
   ensureWiFi();
+  ArduinoOTA.poll(); 
+  
   ensureMQTT();
   mqttClient.loop();
 
@@ -800,6 +944,7 @@ void loop() {
         scanCol = 0;
         effect = EFFECT_TRIANGLE;
         effectStartMs = nowMs;
+        animStartTriangle = nowMs; 
         publishCmdJSON("col_temporal_grad", DURATION_TRIANGLE_MS / 1000, faceName);
       }
 
