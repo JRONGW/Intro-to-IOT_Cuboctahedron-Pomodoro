@@ -85,6 +85,12 @@ const float EXIT_TH    = 0.72f;
 //exit threshold for leaving that face
 //arccos(0.72) ≈ 44.0°
 
+//So a face is conunted as ‘down’ if its normal is within 36.9 degrees
+//It stays down until you tilt it past 44 degrees
+
+// ENTER_TH < score < EXIT_TH creates a 7.1 degree hysteresis band that prevents flicker/rapid toggling when you are near the boundary
+
+
 const float LPF_ALPHA  = 0.20f;
 //this is the smoothing factor for the exponential 
 //moving average(EMA) on the gravity vector
