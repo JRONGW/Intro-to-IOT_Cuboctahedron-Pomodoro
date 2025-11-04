@@ -785,12 +785,20 @@ void loop() {
 
   float n2 = gx * gx + gy * gy + gz * gz;
   if (n2 < 1e-6f) { delay(10); return; }
+  //If it’s ~0, the reading is bogus (e.g., free-fall, 
+  //disconnection, or transient glitch). We skip this 
+  //loop to avoid dividing by ~0 later.
 
   float invn = invSqrt(n2);
   gx *= invn; gy *= invn; gz *= invn;
 
   // now ||(gx,gy,gz)|| = 1, 
   //After this, (gx, gy, gz) is a unit gravity direction vector.
+  //After this, (gx, gy, gz) is a direction vector pointing along 
+  //measured gravity, with length ≈ 1.
+  //This is perfect for dot-product face detection because it 
+  // removes amplitude variation.
+
 
   // Low-pass + renormalize
   // Low-pass = smoothing: It removes high-frequency 
@@ -804,6 +812,10 @@ void loop() {
     gx_f = gx; gy_f = gy; gz_f = gz; haveLPF = true;
   } else {
     // 1) Low-pass (EMA / IIR(1))
+    //New = (1-α)·Old + α·Current
+    //Smaller LPF_ALPHA → more smoothing (slower response, less jitter).
+    //Larger LPF_ALPHA → faster response (more jitter passes).
+
     gx_f = (1.0f - LPF_ALPHA) * gx_f + LPF_ALPHA * gx;
     gy_f = (1.0f - LPF_ALPHA) * gy_f + LPF_ALPHA * gy;
     gz_f = (1.0f - LPF_ALPHA) * gz_f + LPF_ALPHA * gz;
