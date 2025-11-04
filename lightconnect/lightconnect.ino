@@ -25,7 +25,7 @@ char pass[] = SECRET_PASS;
 
 /********* MQTT *********/
 static const char* MQTT_HOST = "mqtt.cetools.org";
-static const int   MQTT_PORT = 1884;  // use 1884
+static const int   MQTT_PORT = 1884;  
 static const char* MQTT_CLIENTID = "MKR1010_Cubo_FaceEffects";
 
 #ifdef MQTT_USERNAME
@@ -78,8 +78,17 @@ const char* N8name[8] = {
 
 /********* Detection thresholds & timing *********/
 const float ENTER_TH   = 0.80f;
+//entry threshold for detecting a face as ‘down’
+//arccos(0.80) ≈ 36.9°
+
 const float EXIT_TH    = 0.72f;
+//exit threshold for leaving that face
+//arccos(0.72) ≈ 44.0°
+
 const float LPF_ALPHA  = 0.20f;
+//this is the smoothing factor for the exponential 
+//moving average(EMA) on the gravity vector
+
 const unsigned long DWELL_MS       = 10000UL;  // 10 s confirm
 const unsigned long REARM_DROP_MS  = 800UL;
 
@@ -523,7 +532,7 @@ inline void latchYellowOn() {
   detectEnabled = true;
 
   // NEW: reconnect WiFi + MQTT when (re)enabling detection
-  reconnectWiFiAndMQTT();   // <-- add this line
+  reconnectWiFiAndMQTT();   
 
   // Start yellow fresh
   effect = EFFECT_YELLOW;
@@ -678,7 +687,7 @@ void updateEffects() {
 /********* SETUP *********/
 void setup() {
   Serial.begin(115200);
-  unsigned long t0 = millis();          // don’t hang on battery
+  unsigned long t0 = millis();       
   while (!Serial && millis() - t0 < 2000) {}
 
   pinMode(BTN_PIN, INPUT); 
@@ -750,7 +759,23 @@ void loop() {
   // ---- IMU READ ----
   int16_t ax, ay, az;
   mpu.getAcceleration(&ax, &ay, &az);
+  //When the accelerometer is configured at ±2 g range, 
+  //its sensitivity is 16 384 Least Significant Bit per g. 
+  //Dividing the raw readings (ax, ay, az) by 16384.0f
+  //converts them from raw counts to g units 
+  //(so a stationary device might read ≈ (0, 0, 1)).🦜
+
+
+
   float gx = ax / 16384.0f, gy = ay / 16384.0f, gz = az / 16384.0f;
+
+  //Following is a safety check.
+  //If the squared length is near zero, it means the vector 
+  //is almost zero — maybe a bad reading, disconnected sensor, 
+  //or free-fall (no gravity detected).
+  //Instead of dividing by zero (which would produce NaN), 
+  //it just waits a bit and skips the update.
+
 
   float n2 = gx * gx + gy * gy + gz * gz;
   if (n2 < 1e-6f) { delay(10); return; }
@@ -758,14 +783,26 @@ void loop() {
   float invn = invSqrt(n2);
   gx *= invn; gy *= invn; gz *= invn;
 
+  // now ||(gx,gy,gz)|| = 1, 
+  //After this, (gx, gy, gz) is a unit gravity direction vector.
+
+  // Low-pass + renormalize
+  // Low-pass = smoothing: It removes high-frequency 
+  // jitter/noise and short bumps from the accelerometer 
+  // so the “which face is down” logic doesn’t flicker.
+  // LPF_ALPHA is the smoothing factor.
+
+
   // Low-pass + renormalize
   if (!haveLPF) {
     gx_f = gx; gy_f = gy; gz_f = gz; haveLPF = true;
   } else {
+    // 1) Low-pass (EMA / IIR(1))
     gx_f = (1.0f - LPF_ALPHA) * gx_f + LPF_ALPHA * gx;
     gy_f = (1.0f - LPF_ALPHA) * gy_f + LPF_ALPHA * gy;
     gz_f = (1.0f - LPF_ALPHA) * gz_f + LPF_ALPHA * gz;
 
+    // 2) Re-normalize to unit length
     float m2 = gx_f * gx_f + gy_f * gy_f + gz_f * gz_f;
     float invm = invSqrt(m2);
     gx_f *= invm; gy_f *= invm; gz_f *= invm;
