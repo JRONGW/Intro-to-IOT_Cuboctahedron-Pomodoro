@@ -1,6 +1,7 @@
 # Cuboctahedron Pomodoro
 
-<img width="3508" height="2480" alt="A4 cuboctahedron" src="https://github.com/user-attachments/assets/c7dc24c6-79b9-4ce6-9825-288ae5f0f4da" />
+![A4 cuboctahedron](https://github.com/user-attachments/assets/e4574ac1-f012-4946-87b6-dab53b5bcf06)
+
 
 - The core functionality of the Cuboctahedron Pomodoro is using it as a timer for work and rest. Cuboctahedron is a symmetrical geometry representing the bi-mode of this pomodoro with its 6 identical squares and 8 identical triangles. The larger square surface down sets a 25min clock for work. The smaller triangle surface down sets a 5min clock for rest. In the testing, I use the 20s as a substitution for 25min clock and 10s as a substitution for 5min clock.
 
