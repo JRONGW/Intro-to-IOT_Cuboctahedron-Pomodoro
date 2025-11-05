@@ -42,7 +42,7 @@ Robustness
  - It shows as a blob of bytes that can be toggled to hex
 
 #### 2)JSON “telemetry/commands” for status/timer
-- These are the two snprintf(...) payloads you still publish to mqtt_cmd_topic:
+- These are the two snprintf(...) payloads published to mqtt_cmd_topic:
 - Timer/transition message (called in updateEffects() when switching modes):
  - Example payload:
  - {"device":"MKR1010_Cubo_FaceEffects","cmd":"timer","palette":"row_temporal_grad","seconds":20,"face":"+X"}
