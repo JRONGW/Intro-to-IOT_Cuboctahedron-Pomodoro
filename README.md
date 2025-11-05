@@ -1,7 +1,6 @@
 # Cuboctahedron Pomodoro
 
-<img width="3508" height="2480" alt="A4 cuboctahedron" src="https://github.com/user-attachments/assets/2e533b55-ed58-4602-88ed-a8a5981389ff" />
-
+<img width="3508" height="2480" alt="A4 cuboctahedron" src="https://github.com/user-attachments/assets/c7dc24c6-79b9-4ce6-9825-288ae5f0f4da" />
 
 - The core functionality of the Cuboctahedron Pomodoro is using it as a timer for work and rest. Cuboctahedron is a symmetrical geometry representing the bi-mode of this pomodoro with its 6 identical squares and 8 identical triangles. The larger square surface down sets a 25min clock for work. The smaller triangle surface down sets a 5min clock for rest. In the testing, I use the 20s as a substitution for 25min clock and 10s as a substitution for 5min clock.
 
@@ -16,7 +15,7 @@
 - Edge-side filtering + hysteresis + dwell time can eliminate "false triggering" at the device end and reduce the noise of uplink data (the value of edge computing).
 Robustness
 ####  Robustness1: Unit-vector normalization + zero-guard: 
-- I compute n2 and bail if it’s ≈0, then normalize → prevents NaNs and ensures stable dot products. If I don’t normalize the accelerometer vector, the direction test gets contaminated by magnitude, which breaks your thresholds, hysteresis, and dwell logic. Because the thresholds are set assuming that the n2 is normalized
+- I compute n2 and bail if it’s ≈0, then normalize → prevents NaNs and ensures stable dot products. If I don’t normalize the accelerometer vector, the direction test gets contaminated by magnitude, which breaks thresholds, hysteresis, and dwell logic. Because the thresholds are set assuming that the n2 is normalized
 ####  Robustness2: LPF + re-normalize: 
 - exponential smoothing (LPF_ALPHA) damps jitter; re-normalizing keeps math stable.
 ####  Robustness3: Hysteresis (ENTER_TH/EXIT_TH): 
