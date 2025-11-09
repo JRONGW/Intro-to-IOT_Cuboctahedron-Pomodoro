@@ -98,6 +98,13 @@ Effects updated
 https://github.com/user-attachments/assets/3790d0ce-7d41-47c6-a9a7-6038a02cd146
 
 
+<img width="133" height="211" alt="image" src="https://github.com/user-attachments/assets/da2dd495-99c4-4f8e-853c-8df26b915a6d" />
+
+Lid, button, and Lipo battery added, timer is represented with a gradual fill
+https://github.com/user-attachments/assets/802b1e29-6ce2-49ec-8bdd-a41c0206a4fa
+
+
+
 
 # Code for Face Detection, MQTT Connection, and Light Control - lightconnect.ino
 ## Hardware/Overall Structure
