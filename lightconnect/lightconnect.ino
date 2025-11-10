@@ -769,8 +769,8 @@ void loop() {
   //its sensitivity is 16 384 Least Significant Bit per g. 
   //Dividing the raw readings (ax, ay, az) by 16384.0f
   //converts them from raw counts to g units 
-  //(so a stationary device might read ≈ (0, 0, 1)).🦜
-
+  //(so a stationary device might read ≈ (0, 0, 1)).
+  //🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜🦜
 
 
   float gx = ax / 16384.0f, gy = ay / 16384.0f, gz = az / 16384.0f;
