@@ -88,7 +88,7 @@ const float EXIT_TH    = 0.72f;
 //So a face is conunted as ‘down’ if its normal is within 36.9 degrees
 //It stays down until you tilt it past 44 degrees
 
-// ENTER_TH < score < EXIT_TH creates a 7.1 degree hysteresis band that prevents flicker/rapid toggling when you are near the boundary
+// ENTER_TH and EXIT_TH creates a 7.1 degree hysteresis band that prevents flicker/rapid toggling when you are near the boundary
 
 
 const float LPF_ALPHA  = 0.20f;
@@ -844,23 +844,36 @@ void loop() {
 
   // Hysteresis tracking for currentFace
   if (currentFace.idx == -1) {
+    // Not tracking → only lock when a candidate is clearly good
     if (bestScore > ENTER_TH) {
       currentFace.isSquare = bestIsSquare;
-      currentFace.idx = bestIdx;
-      currentFace.score = bestScore;
+      currentFace.idx      = bestIdx;
+      currentFace.score    = bestScore;
+      belowActive = false;
     }
   } else {
+    // Already tracking
     if (bestIsSquare == currentFace.isSquare && bestIdx == currentFace.idx) {
+      // Same face still best → refresh score
       currentFace.score = bestScore;
     } else {
-      if (bestScore > ENTER_TH || currentFace.score < EXIT_TH) {
+      // Different face is best now
+      if (bestScore > ENTER_TH) {
+        // New face is strong → switch
         currentFace.isSquare = bestIsSquare;
-        currentFace.idx = bestIdx;
-        currentFace.score = bestScore;
+        currentFace.idx      = bestIdx;
+        currentFace.score    = bestScore;
+        belowActive = false;
+      } else if (currentFace.score < EXIT_TH) {
+        // Current face got weak → drop lock; wait for a strong re-entry
+        currentFace.idx   = -1;
+        currentFace.score = 0.0f;  // optional
         belowActive = false;
       }
+      // else: keep tracking the current face (do nothing)
     }
   }
+
 
   bool haveCandidate = (currentFace.idx != -1) && (currentFace.score > ENTER_TH);
 
